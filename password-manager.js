@@ -23,7 +23,9 @@ class Keychain {
    */
   constructor() {
     this.data = { 
-      creator: "dwgth4i"
+      kvs: Date.now(),
+      iv: getRandomBytes(16),
+      salt: getRandomBytes(16)
     };
     this.secrets = {
     };
@@ -57,8 +59,6 @@ class Keychain {
       master_password : password,
       hmac_for_domain_name: domain_hmac,
       hmac_for_password: pw_hmac,
-      iv: getRandomBytes(16),
-      salt: getRandomBytes(16),
       aesKey: aesKey
     }
     return keychain
@@ -83,9 +83,31 @@ class Keychain {
     * Return Type: Keychain
     */
   static async load(password, repr, trustedDataCheck) {
+
+    // const decodeKeysAndValues = (obj) => {
+    //   if (typeof obj !== 'object' || obj === null) {
+    //     return obj; // If it's not an object, return as is
+    //   }
+    
+    //   const decodedObj = {};
+    //   for (const key in obj) {
+    //     if (Object.prototype.hasOwnProperty.call(obj, key)) {
+    //       const decodedKey = Buffer.from(key, 'base64').toString('utf-8');
+    //       const value = obj[key];
+    //       decodedObj[decodedKey] = typeof value === 'object' ? decodeKeysAndValues(value) : Buffer.from(value, 'base64').toString('utf-8'); // Recursively decode nested objects or decode values
+    //     }
+    //   }
+    //   return decodedObj;
+    // };
+
     const jsonData = JSON.parse(repr);
-    const string_json = JSON.stringify(jsonData);
-    const buffer_data = stringToBuffer(string_json);
+    let actual_data = jsonData["data"]
+    let decoded_data = Buffer.from(actual_data,"base64").toString("utf-8")
+
+    let actual_parse = JSON.parse(decoded_data)
+
+
+    const buffer_data = stringToBuffer(decoded_data);
     const buffer_checksum = await subtle.digest("SHA-256", buffer_data);
     const string_checksum = bufferToString(buffer_checksum)
 
@@ -95,8 +117,8 @@ class Keychain {
     }
 
     const recover_kvs = new Keychain();
-    recover_kvs.data = jsonData.data;
-    recover_kvs.secrets = jsonData.secrets;
+    recover_kvs.data = actual_parse.data;
+    recover_kvs.secrets = actual_parse.secrets;
 
     if (password == recover_kvs.secrets.master_password) {
       return recover_kvs;
@@ -123,17 +145,40 @@ class Keychain {
     */ 
   async dump() {
     // Encode the data as base64
-    const dump_data = { data: this.data, secrets: this.secrets };
-    const jsonData = JSON.stringify(dump_data);
-    const buffer_data = stringToBuffer(jsonData)
+    const encodeKeysAndValues = (obj) => {
+      if (typeof obj !== 'object' || obj === null) {
+        return obj; // If it's not an object, return as is
+      }
+  
+      const encodedObj = {};
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          const encodedKey = Buffer.from(key).toString('base64');
+          const value = obj[key];
+          encodedObj[encodedKey] = typeof value === 'object' ? encodeKeysAndValues(value) : Buffer.from(value).toString('base64'); // Recursively encode nested objects or encode values
+        }
+      }
+      return encodedObj;
+    };
+  
+    let dump_data = {"data" : this.data, "secrets" : this.secrets}
+    let jsonData = JSON.stringify(dump_data);
 
+    let encoded_data = Buffer.from(jsonData,"utf-8").toString("base64")
+    let enc = {"data" : encoded_data, "kvs": encodeKeysAndValues(this.data)}
+
+    let string_enc = JSON.stringify(enc)
+
+    let buffer_data = stringToBuffer(jsonData);
+  
     // Calculate the checksum over the serialized data
     const checksum = await subtle.digest("SHA-256", buffer_data);
-
-    const string_checksum = bufferToString(checksum)
-
-    return [jsonData, string_checksum];
+  
+    const string_checksum = bufferToString(checksum);
+  
+    return [string_enc, string_checksum];
   }
+  
 
 
 
