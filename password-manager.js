@@ -4,7 +4,7 @@
 
 const { stringToBuffer, bufferToString, encodeBuffer, decodeBuffer, getRandomBytes } = require("./lib");
 const { subtle } = require('crypto').webcrypto;
-const { crypto } = require('crypto');
+const crypto = require('crypto');
 
 /********* Constants ********/
 
@@ -23,13 +23,12 @@ class Keychain {
    */
   constructor() {
     this.data = { 
-      /* Store member variables that you intend to be public here
-         (i.e. information that will not compromise security if an adversary sees) */
+      creator: "dwgth4i"
     };
     this.secrets = {
-      /* Store member variables that you intend to be private here
-         (information that an adversary should NOT see). */
     };
+
+    
   };
 
   /** 
@@ -40,34 +39,30 @@ class Keychain {
     * Return Type: void
     */
   static async init(password) {
-    return new Promise((resolve, reject) => {
-        const salt = getRandomBytes(16);
-        crypto.pbkdf2(password, salt, PBKDF2_ITERATIONS, 64, 'sha512', (err, key) => {
-            if (err) {
-                reject(err);
-                return;
-            }
-            const key_for_hmac = key.toString('base64');
-            const buffer_key_for_hmac = stringToBuffer(key_for_hmac);
-            const hmac = crypto.createHmac('sha512', buffer_key_for_hmac);
-            const subKeyForMac = hmac.update('MAC domain names').digest();
-            const subKeyForEncrypt = hmac.update('Encrypt passwords').digest();
-            
-            const keychain = new Keychain();
-            keychain.data = {};
-            keychain.secrets = {
-                master_password: password,
-                key_for_hmac: key_for_hmac,
-                buffer_key_for_hmac: buffer_key_for_hmac,
-                hmac_value: hmac,
-                subkey_for_mac_domain: subKeyForMac,
-                subkey_for_encrypting_password: subKeyForEncrypt
-            };
-            resolve(keychain);
-        });
-    });
-  }
+    const master_key = await subtle.importKey("raw", stringToBuffer(password),"PBKDF2", false, ["deriveKey"]);
+    const hmac1 = crypto.createHmac('sha256', master_key);
+    const data_domain = hmac1.update('MAC Domain Name');
+    const domain_hmac = data_domain.digest('hex').substring(0, 32);
 
+    const hmac2 = crypto.createHmac('sha256', master_key);
+    const data_pw = hmac2.update('Encrypt Password');
+    const pw_hmac = data_pw.digest('hex').substring(0, 32);
+
+    const aesKey = await subtle.importKey(
+      "raw", stringToBuffer(pw_hmac), "AES-GCM", true, ["encrypt", "decrypt"]);
+
+    const keychain = new Keychain()
+    keychain.data = {}
+    keychain.secrets = {
+      master_password : password,
+      hmac_for_domain_name: domain_hmac,
+      hmac_for_password: pw_hmac,
+      iv: getRandomBytes(16),
+      salt: getRandomBytes(16),
+      aesKey: aesKey
+    }
+    return keychain
+}
 
 
   /**
@@ -87,18 +82,32 @@ class Keychain {
     *   trustedDataCheck: string
     * Return Type: Keychain
     */
-  static async load(password, repr, checksum) {
-    const [checkJson, _] = this.dump();
-    if (repr === checkJson) {
-      try {
-        if (password === this.secrets.master_password) {
-          return this.init(password);
-        }
-      } catch (error) {
-        throw "chiu roi man";
-      }
+  static async load(password, repr, trustedDataCheck) {
+    const jsonData = JSON.parse(repr);
+    const string_json = JSON.stringify(jsonData);
+    const buffer_data = stringToBuffer(string_json);
+    const buffer_checksum = await subtle.digest("SHA-256", buffer_data);
+    const string_checksum = bufferToString(buffer_checksum)
+
+
+    if (trustedDataCheck && string_checksum !== trustedDataCheck) {
+        throw new Error("Integrity check failed. Provided trustedDataCheck does not match the checksum.");
     }
-  }
+
+    const recover_kvs = new Keychain();
+    recover_kvs.data = jsonData.data;
+    recover_kvs.secrets = jsonData.secrets;
+
+    if (password == recover_kvs.secrets.master_password) {
+      return recover_kvs;
+    } else {
+      throw "Wrong password"
+    }
+
+    
+}
+
+
 
   /**
     * Returns a JSON serialization of the contents of the keychain that can be 
@@ -113,10 +122,20 @@ class Keychain {
     * Return Type: array
     */ 
   async dump() {
-    const serializedData = JSON.stringify({ data: this.data, secrets: this.secrets });
-    const hash = await crypto.createHash('sha256').update(serializedData).digest('hex');
-    return [serializedData, hash];
+    // Encode the data as base64
+    const dump_data = { data: this.data, secrets: this.secrets };
+    const jsonData = JSON.stringify(dump_data);
+    const buffer_data = stringToBuffer(jsonData)
+
+    // Calculate the checksum over the serialized data
+    const checksum = await subtle.digest("SHA-256", buffer_data);
+
+    const string_checksum = bufferToString(checksum)
+
+    return [jsonData, string_checksum];
   }
+
+
 
   /**
     * Fetches the data (as a string) corresponding to the given domain from the KVS.
@@ -128,18 +147,14 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
-    const hmac = crypto.createHmac('sha256', this.secrets.subkey_for_mac_domain);
-    const mac_domain_name = hmac.update(name).digest('hex');
-    const encrypted_pw = this.data[mac_domain_name];
-    if (encrypted_pw) {
-      const decipher = crypto.createDecipheriv('aes-256-gcm', this.secrets.subkey_for_encrypting_password, stringToBuffer(encrypted_pw));
-      let decrypted = decipher.update(encrypted_pw.encrypted, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      return decrypted;
+    // const hmac = crypto.createHmac('sha256', this.secrets["hmac_for_domain_name"]);
+    // const hmac_name = hmac.update(name).digest('hex');
+    if (this.data[name]) {
+      return this.data[name]
     } else {
-      return null;
+      return null
     }
-  }
+  };
 
   /** 
   * Inserts the domain and associated data into the KVS. If the domain is
@@ -152,13 +167,17 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    const hmac = crypto.createHmac('sha256', this.secrets.subkey_for_mac_domain);
-    const mac_domain_name = hmac.update(name).digest('hex');
-    const cipher = crypto.createCipheriv('aes-256-gcm', this.secrets.subkey_for_encrypting_password);
-    let encrypted = cipher.update(value, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    this.data[mac_domain_name] = encrypted;
-  }
+    // const hmac1 = crypto.createHmac('sha256', this.secrets.hmac_for_domain_name);
+    // const hmac_name = hmac1.update(name).digest('hex');
+
+    // const cipher = crypto.createCipheriv('aes-256-gcm', this.secrets.aesKey, Buffer.from(this.secrets.iv, 'hex'));
+    // let encrypted = cipher.update(value, 'utf8', 'hex');
+    // encrypted += cipher.final('hex');
+
+    // this.data[hmac_name] = encrypted;
+    this.data[name] = value
+}
+
   /**
     * Removes the record with name from the password manager. Returns true
     * if the record with the specified name is removed, false otherwise.
@@ -168,15 +187,13 @@ class Keychain {
     * Return Type: Promise<boolean>
   */
   async remove(name) {
-    const hmac = crypto.createHmac('sha256', this.secrets.subkey_for_mac_domain);
-    const mac_domain_name = hmac.update(name).digest('hex');
-    if (this.data[mac_domain_name]) {
-      delete this.data[mac_domain_name];
-      return true;
+    if (this.data[name]) {
+      delete this.data[name]
+      return true
     } else {
-      return false;
+      return false
     }
-  }
-}
+  };
+};
 
 module.exports = { Keychain }
